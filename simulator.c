@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#define MAX_TIME_UNIT 1000
 #define MAX_PROCESS_NUM 30
 #define TIME_QUANTUM 3
 
@@ -11,10 +12,11 @@
 
 // CPU 스케줄링 알고리즘 상수
 #define FCFS 0
-#define SJF 1
-#define PRIORITY 2
-#define RR 3
-
+#define NP_SJF 1
+#define P_SJF 2
+#define NP_PRIORITY 3
+#define P_PRIORITY 4
+#define RR 5
 
 // CPU 구조체 정의
 typedef struct Process* processPointer;
@@ -26,11 +28,20 @@ typedef struct Process {
 	int ioBurstTime;
 	int ioRemainingTime;
 	int ioRequestTime; // 일단은 io 한번만 발생하게 설정(평가항목 2번 감점요인/ 추후에 수정하기)
-	int priority;
+	int priority; // 낮을 수록 높은 우선순위라 가정
 	int waitingTime;
 	int turnaroundTime;
 	int responseTime; 
+	int rrUsedTime;
 }Process;
+
+// 함수 원형 
+processPointer ALG_FCFS();
+processPointer ALG_NP_SJF();
+processPointer ALG_P_SJF();
+processPointer ALG_NP_PRIORITY();
+processPointer ALG_P_PRIORITY();
+processPointer ALG_RR();
 
 
 // 전역변수 및 큐 정의
@@ -67,6 +78,7 @@ void initQueues() {
 	runningProcess = NULL;
 	currentTime = 0;
 	cpuIdleTime = 0;
+	
 
 	for (int i = 0; i < MAX_PROCESS_NUM; i++) {
 		jobQueue[i] = NULL;
@@ -119,6 +131,7 @@ processPointer createProcess() {
 	newProcess->waitingTime = 0;
 	newProcess->turnaroundTime = 0;
 	newProcess->responseTime = -1; // 아직 cpu 할당받지 않았으니까 -1로 초기화
+	newProcess->rrUsedTime = 0;
 
 	return newProcess;
 }
@@ -311,7 +324,22 @@ void simulate(int algorithm) {
 		// 알고리즘 선택
 		switch (algorithm) {
 			case FCFS:
-				selected = FCFS();
+				selected = ALG_FCFS();
+				break;
+			case NP_SJF:
+				selected = ALG_NP_SJF();
+				break;
+			case P_SJF:
+				selected = ALG_P_SJF();
+				break;
+			case NP_PRIORITY:
+				selected = ALG_NP_PRIORITY();
+				break;
+			case P_PRIORITY:
+				selected = ALG_P_PRIORITY();
+				break;
+			case RR:
+				selected = ALG_RR();
 				break;
 		}
 
@@ -330,6 +358,9 @@ void simulate(int algorithm) {
 				runningProcess->responseTime = currentTime - runningProcess->arrivalTime; // response time은 현재시간 - 도착시간
 			}
 
+			// RR일 때, time quantum 사용 체크
+			runningProcess->rrTimeUsed++;
+
 			// 실행
 			runningProcess->cpuRemainingTime--;
 			runningProcess->turnaroundTime++;
@@ -339,6 +370,8 @@ void simulate(int algorithm) {
 			// IO request 발생
 			if (runningProcess->cpuRemainingTime > 0 &&
 				runningProcess->cpuBurstTime - runningProcess->cpuRemainingTime == runningProcess->ioRequestTime) {
+				// RR일 때
+				runningProcess->rrTimeUsed = 0;
 				// 아직 실행이 안끝났고 io 요청 시간에 도달했으면
 				insertWaitingQueue(runningProcess); // waiting 큐로 보내야함
 				runningProcess = NULL; // cpu는 idle로 변함
@@ -347,6 +380,8 @@ void simulate(int algorithm) {
 
 			// cpu burst 완료
 			if (runningProcess->cpuRemainingTime == 0) { // cpu 남은 시간 없으면
+				// RR일 때
+				runningProcess->rrTimeUsed = 0;
 				insertTerminatedQueue(runningProcess); // terminated 큐로 이동
 				runningProcess = NULL;
 			}
@@ -361,13 +396,148 @@ void simulate(int algorithm) {
 
 // FCFS 알고리즘(평가항목 3번)
 // ready 큐에 들어온 순서대로 실행
-// cpu burst 끝나면 terminated 큐로
-// 실행하다가 io request 있으면 waiting 큐로
-
-processPointer FCFS() {
-	if (readySize == 0) return NULL;
+processPointer ALG_FCFS() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL
 	if (runningProcess == NULL) {
 		return deleteReadyQueue(0); // ready 큐 맨 앞 프로세스 반환
 	}
 	return runningProcess; // 현재 실행중인 프로세스 그대로 반환
+}
+
+// Non-Preemptive SJF 알고리즘(평가항목 4번)
+// 남은 cpu time 짧은 프로세스부터 실행
+// 한번 프로세스가 시작되면 선점되지 않고 쭉 실행됨
+processPointer ALG_NP_SJF() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL
+	if (runningProcess == NULL) {
+		int min_index = 0;
+		for (int i = 0; i < readySize; i++) {
+			// 남은 cpu time 가장 짧은 프로세스 찾기
+			if (readyQueue[i]->cpuRemainingTime < readyQueue[min_index]->cpuRemainingTime) {
+				min_index = i;
+			}
+			// 남은 cpu time이 같으면 도착 시간 기준으로
+			else if (readyQueue[i]->cpuRemainingTime == readyQueue[min_index]->cpuRemainingTime) {
+				if (readyQueue[i]->arrivalTime < readyQueue[min_index]->arrivalTime) {
+					min_index = i;
+				}
+			}
+		}
+		return deleteReadyQueue(min_index);
+	}
+	else {
+		return runningProcess;
+	}
+}
+// Preemptive SJF 알고리즘(평가항목 5번)
+// 남은 cpu time 짧은 프로세스부터 실행
+// 매 시간 cpu time을 체크해서 더 적은 실행시간을 가진 프로세스가 있으면 선점
+processPointer ALG_P_SJF() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL
+	int min_index = 0;
+	for (int i = 0; i < readySize; i++) {
+		if (readyQueue[i]->cpuRemainingTime < readyQueue[min_index]->cpuRemainingTime) {
+			min_index = i;
+		}
+		// 남은 cpu time이 같으면 도착 시간 기준으로
+		else if (readyQueue[i]->cpuRemainingTime == readyQueue[min_index]->cpuRemainingTime) {
+			if (readyQueue[i]->arrivalTime < readyQueue[min_index]->arrivalTime) {
+				min_index = i;
+			}
+		}
+	}
+	// preemptive 체크
+	if (runningProcess == NULL) { // 먼저 실행 중인 프로세스 없으면 그냥 ready 큐에서 가져오면 됨
+		return deleteReadyQueue(min_index);
+	}
+	// 실행 중인 프로세스보다 새로 들어온 프로세스가 짧으면 선점
+	if (runningProcess->cpuRemainingTime > readyQueue[min_index]->cpuRemainingTime) {
+		insertReadyQueue(runningProcess);
+		return deleteReadyQueue(min_index);
+	}
+	// 아니면 그냥 기존 프로세스 계속 실행
+	return runningProcess;
+	}
+}
+
+// Non-Preemptive PRIORITY 알고리즘(평가항목 6번)
+// 한번 프로세스가 시작하면 선점되지 않고 쭉 실행됨
+// Priority가 높은 순서대로 실행
+processPointer ALG_NP_PRIORITY() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL{
+	if (runningProcess == NULL) {
+		int min_index = 0;
+		for (int i = 0; i < readySize; i++) {
+			//  priority 가장 높은 프로세스 찾기
+			if (readyQueue[i]->priority < readyQueue[min_index]->priority) {
+				min_index = i;
+			}
+			// priority가 같으면 도착 시간 기준으로
+			else if (readyQueue[i]->priority == readyQueue[min_index]->priority) {
+				if (readyQueue[i]->arrivalTime < readyQueue[min_index]->arrivalTime) {
+					min_index = i;
+				}
+			}
+		}
+		return deleteReadyQueue(min_index);
+	}
+	else {
+		return runningProcess;
+	}
+}
+
+// Non-Preemptive PRIORITY 알고리즘(평가항목 6번)
+// Priority가 높은 순서대로 실행
+// 매 시간 priority를 체크해서 더 높은 priority를 가진 프로세스가 있으면 선점
+processPointer ALG_P_PRIORITY() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL
+	
+	int min_index = 0;
+	for (int i = 0; i < readySize; i++) {
+		//  priority 가장 높은 프로세스 찾기
+		if (readyQueue[i]->priority < readyQueue[min_index]->priority) {
+			min_index = i;
+		}
+		// priority가 같으면 도착 시간 기준으로
+		else if (readyQueue[i]->priority == readyQueue[min_index]->priority) {
+			if (readyQueue[i]->arrivalTime < readyQueue[min_index]->arrivalTime) {
+				min_index = i;
+			}
+		}
+	}
+	// preemptive 체크
+	if (runningProcess == NULL) { 
+		return deleteReadyQueue(min_index); // 먼저 실행 중인 프로세스 없으면 그냥 ready 큐에서 가져오면 됨
+	}
+	// 실행 중인 프로세스보다 새로 들어온 프로세스가 priority가 높으면 선점
+	if (runningProcess->priority > readyQueue[min_index]->priority) {
+		insertReadyQueue(runningProcess);
+		return deleteReadyQueue(min_index);
+	}
+	// 아니면 그냥 기존 프로세스 계속 실행
+	return runningProcess;
+}
+
+
+// Round-Robbin 알고리즘(평가항목 7번)
+// 각 프로세스가 time quantum만큼 실행되고 그 다음 프로세스로 넘어감
+// 프로세스가 끝나지 않으면 ready 큐 맨 뒤로
+processPointer ALG_RR() {
+	if (readySize == 0) return NULL; // ready 큐 비어있으면 NULL
+
+	// 실행중인 프로세스가 없는 경우
+	if (runningProcess == NULL) {
+		processPointer nextProcessor = deleteReadyQueue(0);
+		nextProcessor->rrTimeUsed = 0; // 새로 실행할 프로세서 사용 시간 초기화
+		return nextProcessor;
+	}
+	// 실행 중인 프로세스가 타임 퀀텀만큼 실행된 경우
+	if (runningProcess->rrTimeUsed >= TIME_QUANTUM) {
+		insertReadyQueue(runningProcess); // 다시 ready 큐로
+		processPointer nextProcessor = deleteReadyQueue(0); // 다음 프로세스 실행
+		nextProcessor->rrTimeUsed = 0; // 새로 시작하므로 초기화
+		return nextProcessor;
+	}
+	// 아직 타임퀀텀 끝나기 전이면
+	return runningProcess;
 }
