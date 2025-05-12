@@ -43,6 +43,16 @@ processPointer ALG_NP_PRIORITY();
 processPointer ALG_P_PRIORITY();
 processPointer ALG_RR();
 
+// 함수 배열
+const char* algorithmNames[] = {
+	"FCFS",
+	"Non-Preemptive SJF",
+	"Preemptive SJF",
+	"Non-Preemptive Priority",
+	"Preemptive Priority",
+	"Round Robin"
+};
+
 
 // 전역변수 및 큐 정의
 // job 큐
@@ -68,6 +78,8 @@ int currentTime = 0; // 현재 시간
 int cpuIdleTime = 0; // cpu 유휴 시간
 int usedPID[MAX_PROCESS_NUM] = { 0 }; // pid 랜덤생성할 때, 중복방지를 위해 생성된 pid들은 저장
 
+int ganttChart[MAX_TIME_UNIT]; // 간트 차트 display용
+
 
 // 큐를 초기화하는 함수
 void initQueues() {
@@ -79,12 +91,15 @@ void initQueues() {
 	currentTime = 0;
 	cpuIdleTime = 0;
 	
+	
 
 	for (int i = 0; i < MAX_PROCESS_NUM; i++) {
 		jobQueue[i] = NULL;
 		readyQueue[i] = NULL;
 		waitingQueue[i] = NULL;
 		terminatedQueue[i] = NULL;
+		usedPID[i] = 0;
+		ganttChart[i] = -1;
 	}
 }
 
@@ -223,8 +238,6 @@ void printReadyQueue() {
 
 
 
-
-
 // waiting 큐
 // waiting 큐에 프로세스 삽입
 void insertWaitingQueue(processPointer newProcess) {
@@ -294,6 +307,40 @@ void createProcesses(int n) {
 	sortJobQueue();
 }
 
+// 간트 차트 출력 함수(평가 항목 9번)
+// pid가 바뀔 때마다 출력해서 프로세스 시작과 끝만 표시저
+void printGanttChart() {
+	int previous = ganttChart[0]; // 이전 프로세스의 pid를 저장
+	int start = 0; // 프로세스의 시작점 저장
+
+	printf("=============== Gantt Chart ===============\n");
+	printf("| %2d ", start);
+
+	for (int i = 1; i < MAX_TIME_UNIT; i++) {
+		if (ganttChart[i] != previous) { // 프로세스가 다른 프로세스로 바뀌면 출력
+			if (previous == -1) { 
+				printf("|--idle--|"); // pid가 0이면 프로세스 없고 cpu idle 상태
+			}
+			else {
+				printf("|--P%d--|", previous); // pid가 0이 아니면 pid 출력
+			}
+			printf(" %2d ", i);
+
+			// 새로운 프로세스(구간) 시작
+			start = i; 
+			previous = ganttChart[i];
+		}
+	}
+	// 마지막 구간 출력
+	if (previous == -1)
+		printf("|--idle--|");
+	else
+		printf("|--P%d--|", previous);
+	printf(" %2d |\n", MAX_TIME_UNIT);
+	}
+}
+
+
 // 시뮬레이션 함수
 void simulate(int algorithm) {
 	for (currentTime = 0; currentTime < MAX_TIME_UNIT; currentTime++) {
@@ -321,6 +368,7 @@ void simulate(int algorithm) {
 
 		// 실행할 프로세스 선택
 		processPointer selected = NULL;
+
 		// 알고리즘 선택
 		switch (algorithm) {
 			case FCFS:
@@ -345,6 +393,7 @@ void simulate(int algorithm) {
 
 		// 실행할 프로세스 없으면 cpu idle
 		if (selected == NULL) {
+			ganttChart[currentTime] = -1;
 			cpuIdleTime++;
 			printf("%d: CPU is idle\n", currentTime);
 		}
@@ -352,6 +401,7 @@ void simulate(int algorithm) {
 		// 실행할 프로세스 있으면
 		else {
 			runningProcess = selected;
+			ganttChart[currentTime] = runningProcess->pid;
 
 			// response time 저장
 			if (runningProcess->responseTime == -1) {
@@ -367,7 +417,7 @@ void simulate(int algorithm) {
 			printf("%d: PID %d is running (remaining: %d)\n",
 				currentTime, runningProcess->pid, runningProcess->cpuRemainingTime);
 
-			// IO request 발생
+			// IO request 발생(평가 항목 2번)
 			if (runningProcess->cpuRemainingTime > 0 &&
 				runningProcess->cpuBurstTime - runningProcess->cpuRemainingTime == runningProcess->ioRequestTime) {
 				// RR일 때
@@ -541,3 +591,124 @@ processPointer ALG_RR() {
 	// 아직 타임퀀텀 끝나기 전이면
 	return runningProcess;
 }
+
+
+// 같은 프로세스로 평가해야 하니까 복제 함수 필요(job 큐에서)
+void cloneProcessesfromJQ() {
+	readySize = 0;
+	for (int i = 0; i < jobSize; i++) {
+		processPointer original = jobQueue[i];
+		processPointer cloned = (processPointer)malloc(sizeof(Process));
+
+		// 모든 필드 복사
+		cloned->pid = original->pid;
+		cloned->arrivalTime = original->arrivalTime;
+		cloned->cpuBurstTime = original->cpuBurstTime;
+		cloned->cpuRemainingTime = original->cpuBurstTime; // 항상 새로 시작
+		cloned->ioBurstTime = original->ioBurstTime;
+		cloned->ioRemainingTime = original->ioBurstTime;
+		cloned->ioRequestTime = original->ioRequestTime;
+		cloned->priority = original->priority;
+
+		// 초기화
+		cloned->waitingTime = 0;
+		cloned->turnaroundTime = 0;
+		cloned->responseTime = -1;
+		cloned->rrTimeUsed = 0;
+
+		readyQueue[readySize++] = cloned; // ready 큐 다시 채우기
+	}
+}
+
+// 평가(waiting time, turnaround time, response time) 평가항목 10번
+void evaluate() {
+	int totalWaitingTime = 0;
+	int totalTurnaroundTime = 0;
+	int totalResponseTime = 0;
+
+	// terminated 큐에 있는 모든 프로세스 순회
+	for (int i = 0; i < terminatedSize; i++) {
+		totalWaitingTime += terminatedQueue[i]->waitingTime;
+		totalTurnaroundTime += terminatedQueue[i]->turnaroundTime;
+		totalResponseTime += terminatedQueue[i]->responseTime;
+	}
+	
+	// 평균 계산(average waiting time, average turnaround time, average response time)
+	float avgWaitingTime = totalWaitingTime / (float)terminatedSize;
+	float avgTurnaroundTime = totalTurnaroundTime / (float)terminatedSize;
+	float avgResponseTime = totalResponseTime / (float)terminatedSize;
+
+	// 결과 출력
+	printf("\n-------------Evaluation Result-------------\n");
+	printf("avgWaitingTime: %.2f\n", avgWaitingTime);
+	printf("avgTurnaroundTime: %.2f\n", avgTurnaroundTime);
+	printf("avgResponseTime: %.2f\n", avgResponseTime);
+}
+
+
+
+
+// 메인함수
+int main() {
+	srand(time(NULL)); 
+	int numProcesses = 5; // 프로세스 개수 5개로 설정
+
+	// 기준 프로세스 집합 생성(기준이 있어야 같은 프로세스들로 평가 가능)
+	processPointer baseProcesses[MAX_PROCESS_NUM];
+	int baseSize = 0;
+	for (int i = 0; i < numProcesses; i++) {
+		baseProcesses[baseSize++] = createProcess();
+	}
+
+	// 모든 알고리즘 실행 및 평가
+	for (int alg = FCFS; alg <= RR; alg++) {
+		printf("\n============================================\n");
+		printf("%s\n", algorithmNames[alg]);
+
+		// 초기화
+		initQueues();
+
+		// 기준 프로세스 복제 → jobQueue에 저장
+		for (int i = 0; i < baseSize; i++) {
+			processPointer original = baseProcesses[i];
+			processPointer clone = (processPointer)malloc(sizeof(Process));
+
+			// 모든 정보 복사
+			clone->pid = original->pid;
+			clone->arrivalTime = original->arrivalTime;
+			clone->cpuBurstTime = original->cpuBurstTime;
+			clone->cpuRemainingTime = original->cpuBurstTime;
+			clone->ioBurstTime = original->ioBurstTime;
+			clone->ioRemainingTime = original->ioBurstTime;
+			clone->ioRequestTime = original->ioRequestTime;
+			clone->priority = original->priority;
+
+			clone->waitingTime = 0;
+			clone->turnaroundTime = 0;
+			clone->responseTime = -1;
+			clone->rrTimeUsed = 0;
+
+			insertJobQueue(clone); // job 큐에 저장
+		}
+
+		// 시뮬레이션 실행
+		simulate(alg);
+
+		// 간트차트 출력
+		printGanttChart();
+
+		// 평가
+		evaluate();
+
+		// terminated 큐 메모리 해제
+		for (int i = 0; i < terminatedSize; i++) {
+			free(terminatedQueue[i]);
+		}
+	}
+
+	// base 프로세스 메모리 해제
+	for (int i = 0; i < baseSize; i++) {
+		free(baseProcesses[i]);
+	}
+}
+
