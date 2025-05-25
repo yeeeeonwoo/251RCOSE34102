@@ -41,6 +41,11 @@ typedef struct Process {
 	int turnaroundTime;
 	int responseTime;
 	int rrUsedTime;
+	int ioRequestTime;
+	int ioBurstTime;
+	int ioRemainingTime;
+	int isInIO;
+	int hasRequestedIO;
 }Process;
 
 
@@ -62,6 +67,10 @@ int jobSize = 0; // 현재 job큐에 있는 프로세스 개수
 processPointer readyQueue[MAX_PROCESS_NUM];
 int readySize = 0; // 현재 ready큐에 있는 프로세스 개수
 
+processPointer waitingQueue[MAX_PROCESS_NUM];
+int waitingSize = 0;
+
+
 // terminated 큐
 processPointer terminatedQueue[MAX_PROCESS_NUM];
 int terminatedSize = 0; // 현재 terminated큐에 있는 프로세스 개수
@@ -74,28 +83,29 @@ int cpuIdleTime = 0; // cpu 유휴 시간
 int simulationEndTime = 0;
 int usedPID[MAX_PROCESS_NUM] = { 0 }; // pid 랜덤생성할 때, 중복방지를 위해 생성된 pid들은 저장
 int ganttChart[MAX_TIME_UNIT]; // 간트 차트 display용
-
-
+int ioRequestedAt[MAX_TIME_UNIT];
 
 // 큐를 초기화하는 함수
 void initQueues() {
 	jobSize = 0;
 	readySize = 0;
-	//waitingSize = 0;
+	waitingSize = 0;
 	terminatedSize = 0;
 	runningProcess = NULL;
 	currentTime = 0;
 	cpuIdleTime = 0;
 
-
-
 	for (int i = 0; i < MAX_PROCESS_NUM; i++) {
 		jobQueue[i] = NULL;
 		readyQueue[i] = NULL;
-		//waitingQueue[i] = NULL;
+		waitingQueue[i] = NULL;
 		terminatedQueue[i] = NULL;
 		usedPID[i] = 0;
+	}
+
+	for (int i = 0; i < MAX_TIME_UNIT; i++) {
 		ganttChart[i] = -1;
+		ioRequestedAt[i] = -1;  
 	}
 }
 
@@ -131,7 +141,7 @@ processPointer createProcess() {
 	// random data 부여(평가항목 1번)
 	newProcess->pid = generatePID();
 	newProcess->arrivalTime = rand() % 10 + 1; // 범위 1~10으로 설정
-	newProcess->cpuBurstTime = rand() % 20 + 1; // 범위 1~20으로 설정
+	newProcess->cpuBurstTime = rand() % 20 + 2; // 범위 2~20으로 설정
 	newProcess->priority = rand() % 5 + 1; // 범위 1~5로 설정
 
 	// 상태 초기화
@@ -140,6 +150,19 @@ processPointer createProcess() {
 	newProcess->turnaroundTime = 0;
 	newProcess->responseTime = -1; // 아직 cpu 할당받지 않았으니까 -1로 초기화
 	newProcess->rrUsedTime = 0;
+
+	newProcess->ioRequestTime = rand() % (newProcess->cpuBurstTime - 1) + 1;
+	newProcess->ioBurstTime = rand() % 5 + 2;
+	newProcess->ioRemainingTime = 0;
+	newProcess->isInIO = FALSE;
+	newProcess->hasRequestedIO = FALSE;
+
+	printf("PID %d: burst=%d, ioRequest=%d, ioBurst=%d\n",
+	newProcess->pid,
+	newProcess->cpuBurstTime,
+	newProcess->ioRequestTime,
+	newProcess->ioBurstTime);
+
 
 	return newProcess;
 }
@@ -174,15 +197,19 @@ processPointer deleteJobQueue(int index) {
 // job 큐 상태 출력
 void printJobQueue() {
 	if (jobSize == 0) printf("Job Queue is empty\n");
-	printf("pid    arrival_time    CPU burst    priority\n");
-	printf("----------------------------------------------------------------------\n");
+	printf("pid  arrival_time  CPU_burst  priority  IO_request_time  IO_burst_time\n");
+	printf("-------------------------------------------------------------------------\n");
+
 	for (int i = 0; i < jobSize; i++) {
-		printf("%3d    %12d    %9d    %8d\n",
-			jobQueue[i]->pid,
-			jobQueue[i]->arrivalTime,
-			jobQueue[i]->cpuBurstTime,
-			jobQueue[i]->priority
-			);
+		processPointer p = jobQueue[i];
+		printf("%3d  %13d  %10d  %8d  %15d  %14d\n",
+			p->pid,
+			p->arrivalTime,
+			p->cpuBurstTime,
+			p->priority,
+			p->ioRequestTime,
+			p->ioBurstTime
+		);
 	}
 	printf("----------------------------------------------------------------------\n");
 }
@@ -243,6 +270,29 @@ void printReadyQueue() {
 	}
 }
 
+void insertWaitingQueue(processPointer p) {
+	if (waitingSize < MAX_PROCESS_NUM) {
+		waitingQueue[waitingSize++] = p;
+	}
+}
+
+processPointer deleteWaitingQueue(int index) {
+	if (index >= waitingSize) return NULL;
+	processPointer temp = waitingQueue[index];
+	for (int i = index; i < waitingSize - 1; i++) {
+		waitingQueue[i] = waitingQueue[i + 1];
+	}
+	waitingQueue[--waitingSize] = NULL;
+	return temp;
+}
+
+void printWaitingQueue() {
+	printf("\n--- Waiting Queue ---\n");
+	for (int i = 0; i < waitingSize; i++) {
+		printf("PID %d, remaining I/O: %d\n",
+			waitingQueue[i]->pid, waitingQueue[i]->ioRemainingTime);
+	}
+}
 
 
 // terminated큐
@@ -292,33 +342,64 @@ void printGanttChart(int endTime) {
 
 	for (int i = 1; i < endTime; i++) {
 		if (ganttChart[i] != previous) {
-			if (previous == -1)
+			// 구간 출력
+			if (previous == -1) {
 				printf("|--idle--|");
-			else
+			}
+			else if (previous == -2) {
+				if (ioRequestedAt[start] != -1)
+					printf("|--P%d(IO)--|", ioRequestedAt[start]);
+				else
+					printf("|--IO--|");  // 예외 방지
+			}
+			else {
 				printf("|--P%d--|", previous);
-
+			}
 			printf(" %2d ", i);
 			start = i;
 			previous = ganttChart[i];
 		}
 	}
-	// 마지막 구간 출력
-	if (previous == -1)
-		printf("|--idle--|");
-	else
-		printf("|--P%d--|", previous);
 
+	// 마지막 구간 출력
+	if (previous == -1) {
+		printf("|--idle--|");
+	}
+	else if (previous == -2) {
+		if (ioRequestedAt[start] != -1)
+			printf("|--P%d(IO)--|", ioRequestedAt[start]);
+		else
+			printf("|--IO--|");  // 예외 방지
+	}
+	else {
+		printf("|--P%d--|", previous);
+	}
 	printf(" %2d |\n", endTime);
 }
 
 
 void simulate(int algorithm) {
 	for (currentTime = 0; currentTime < MAX_TIME_UNIT; currentTime++) {
+
+		// I/O 완료된 프로세스 있는지  확인
+		for (int i = 0; i < waitingSize; i++) {
+			waitingQueue[i]->ioRemainingTime--;
+
+			if (waitingQueue[i]->ioRemainingTime <= 0) {
+				waitingQueue[i]->isInIO = FALSE;
+
+				printf("%d: PID %d I/O complete (back to ready queue)\n",
+					currentTime, waitingQueue[i]->pid);
+
+				insertReadyQueue(deleteWaitingQueue(i));
+				i--;
+			}
+		}
+
 		// 종료된 running 프로세스 처리
 		if (runningProcess != NULL && runningProcess->cpuRemainingTime <= 0) {
 			insertTerminatedQueue(runningProcess);
 			runningProcess = NULL;
-			//continue;
 		}
 
 		// jobQueue -> readyQueue
@@ -329,9 +410,10 @@ void simulate(int algorithm) {
 				i--;
 			}
 		}
+
 		
 		// 전체 종료 조건
-		if (jobSize == 0 && readySize == 0 && runningProcess == NULL) {
+		if (jobSize == 0 && readySize == 0 && waitingSize == 0 && runningProcess == NULL) {
 			simulationEndTime = currentTime;
 			break;
 		}
@@ -348,9 +430,6 @@ void simulate(int algorithm) {
 			case RR: selected = ALG_RR(); break;
 		}
 
-		// 간트차트 기록
-		ganttChart[currentTime] = (selected != NULL) ? selected->pid : -1;
-
 		if (selected == NULL) {
 			runningProcess = NULL;
 			cpuIdleTime++;
@@ -359,9 +438,30 @@ void simulate(int algorithm) {
 		else {
 			runningProcess = selected;
 
+			// response time 기록
 			if (runningProcess->responseTime == -1)
 				runningProcess->responseTime = currentTime - runningProcess->arrivalTime;
-			if (runningProcess->cpuRemainingTime > 0) {
+
+			// I/O 요청 조건: 아직 요청하지 않았고, 특정 시간 도달
+			if (!runningProcess->hasRequestedIO &&
+				runningProcess->cpuBurstTime - runningProcess->cpuRemainingTime == runningProcess->ioRequestTime) {
+
+				ioRequestedAt[currentTime] = runningProcess->pid;
+				runningProcess->isInIO = TRUE;
+				runningProcess->hasRequestedIO = TRUE;  
+				runningProcess->ioRemainingTime = runningProcess->ioBurstTime;
+
+				printf("%d: PID %d is requesting I/O for %d units\n",
+					currentTime, runningProcess->pid, runningProcess->ioBurstTime);
+
+				insertWaitingQueue(runningProcess);
+				ganttChart[currentTime] = -2;
+				runningProcess = NULL;
+				cpuIdleTime++;
+				continue;
+			}
+			else {
+				// CPU에서 정상 실행
 				runningProcess->cpuRemainingTime--;
 				runningProcess->turnaroundTime++;
 				runningProcess->rrUsedTime++;
@@ -369,18 +469,28 @@ void simulate(int algorithm) {
 				printf("%d: PID %d is running (remaining: %d)\n",
 					currentTime, runningProcess->pid, runningProcess->cpuRemainingTime);
 
-				// 만약 방금 실행해서 종료된 경우 → 바로 종료 처리
+				// 실행 종료 시 terminate
 				if (runningProcess->cpuRemainingTime == 0) {
 					insertTerminatedQueue(runningProcess);
 					runningProcess = NULL;
 				}
 			}
 		}
+
+
 		// readyQueue 대기시간 증가
 		for (int i = 0; i < readySize; i++) {
 			readyQueue[i]->waitingTime++;
 			readyQueue[i]->turnaroundTime++;
 		}
+
+		//  간트차트 기록은 시뮬레이션 루프의 마지막에서 수행
+		if (runningProcess != NULL)
+			ganttChart[currentTime] = runningProcess->pid;
+		else if (ioRequestedAt[currentTime] != -1)
+			ganttChart[currentTime] = -2;  // IO 요청 구간
+		else
+			ganttChart[currentTime] = -1;  // idle
 
 		simulationEndTime = currentTime;
 		
@@ -622,6 +732,12 @@ int main() {
 			clone->turnaroundTime = 0;
 			clone->responseTime = -1;
 			clone->rrUsedTime = 0;
+
+			clone->ioRequestTime = original->ioRequestTime;
+			clone->ioBurstTime = original->ioBurstTime;
+			clone->ioRemainingTime = 0;
+			clone->isInIO = FALSE;
+			clone->hasRequestedIO = FALSE;
 
 			insertJobQueue(clone); // job 큐에 저장
 		}
