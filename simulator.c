@@ -2,60 +2,70 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define MAX_TIME_UNIT 1000
-#define MAX_PROCESS_NUM 30
-#define TIME_QUANTUM 3
+#define MAX_TIME_UNIT 1000 // 간트차트 최대길이
+#define MAX_PROCESS_NUM 30 // 최대 프로세스 수
+#define TIME_QUANTUM 3 // RR에서 사용할 타임퀀텀
 
 #define TRUE 1
 #define FALSE 0
 
-// CPU 스케줄링 알고리즘 상수
+// 스케줄링 알고리즘 상수매핑(simulate()에서 switch-case문에 사용됨)
 #define FCFS 0
 #define NP_SJF 1
 #define P_SJF 2
 #define NP_PRIORITY 3
 #define P_PRIORITY 4
 #define RR 5
+#define IASJF 6
 
 
-// 함수 배열
+// 스케줄링 알고리즘 이름 배열(출력용)
 const char* algorithmNames[] = {
 	"FCFS",
 	"Non-Preemptive SJF",
 	"Preemptive SJF",
 	"Non-Preemptive Priority",
 	"Preemptive Priority",
-	"Round Robin"
+	"Round Robin",
+	"IO-Aware SJF",
 };
 
 
 // CPU 구조체 정의
 typedef struct Process* processPointer;
 typedef struct Process {
+	// 프로세스 기본정보
 	int pid;
 	int arrivalTime;
+	int priority; // 낮을 수록 높은 우선순위라 가정
+
+	// cpu burst 관련 정보
 	int cpuBurstTime;
 	int cpuRemainingTime;
-	int priority; // 낮을 수록 높은 우선순위라 가정
-	int waitingTime;
-	int turnaroundTime;
-	int responseTime;
-	int rrUsedTime;
+	int rrUsedTime; // RR 알고리즘에서 프로세스가 현재 사용한 시간(타임퀀텀 끝났는지 확인용)
+
+	// io burst 관련 정보
 	int ioRequestTime;
 	int ioBurstTime;
 	int ioRemainingTime;
 	int isInIO;
 	int hasRequestedIO;
+
+	// evaluation 정보
+	int waitingTime; // 총 대기시간(프로세스가 ready 큐에 있는 시간 합)
+	int turnaroundTime; // 종료시간 - 도착시간
+
 }Process;
 
 
-// 함수 원형 
+// 함수 원형 선언
 processPointer ALG_FCFS();
 processPointer ALG_NP_SJF();
 processPointer ALG_P_SJF();
 processPointer ALG_NP_PRIORITY();
 processPointer ALG_P_PRIORITY();
 processPointer ALG_RR();
+processPointer ALG_IASJF();
 
 
 // 전역변수 및 큐 정의
@@ -148,7 +158,6 @@ processPointer createProcess() {
 	newProcess->cpuRemainingTime = newProcess->cpuBurstTime;
 	newProcess->waitingTime = 0;
 	newProcess->turnaroundTime = 0;
-	newProcess->responseTime = -1; // 아직 cpu 할당받지 않았으니까 -1로 초기화
 	newProcess->rrUsedTime = 0;
 
 	newProcess->ioRequestTime = rand() % (newProcess->cpuBurstTime - 1) + 1;
@@ -156,13 +165,6 @@ processPointer createProcess() {
 	newProcess->ioRemainingTime = 0;
 	newProcess->isInIO = FALSE;
 	newProcess->hasRequestedIO = FALSE;
-
-	printf("PID %d: burst=%d, ioRequest=%d, ioBurst=%d\n",
-	newProcess->pid,
-	newProcess->cpuBurstTime,
-	newProcess->ioRequestTime,
-	newProcess->ioBurstTime);
-
 
 	return newProcess;
 }
@@ -322,12 +324,12 @@ void printTerminatedQueue() {
 		return;
 	}
 	printf("\n-------------Terminated Processes-------------\n");
-	printf("PID  Arrival  Burst  Priority  Waiting  Turnaround  Response\n");
+	printf("PID  Arrival  Burst  Priority  Waiting  Turnaround\n");
 	for (int i = 0; i < terminatedSize; i++) {
 		processPointer p = terminatedQueue[i];
-		printf("%3d  %7d  %5d  %8d  %7d  %10d  %8d\n",
+		printf("%3d  %7d  %5d  %8d  %7d  %10d\n",
 			p->pid, p->arrivalTime, p->cpuBurstTime, p->priority,
-			p->waitingTime, p->turnaroundTime, p->responseTime);
+			p->waitingTime, p->turnaroundTime);
 	}
 }
 
@@ -428,6 +430,7 @@ void simulate(int algorithm) {
 			case NP_PRIORITY: selected = ALG_NP_PRIORITY(); break;
 			case P_PRIORITY: selected = ALG_P_PRIORITY(); break;
 			case RR: selected = ALG_RR(); break;
+			case IASJF: selected = ALG_IASJF(); break;
 		}
 
 		if (selected == NULL) {
@@ -438,9 +441,6 @@ void simulate(int algorithm) {
 		else {
 			runningProcess = selected;
 
-			// response time 기록
-			if (runningProcess->responseTime == -1)
-				runningProcess->responseTime = currentTime - runningProcess->arrivalTime;
 
 			// I/O 요청 조건: 아직 요청하지 않았고, 특정 시간 도달
 			if (!runningProcess->hasRequestedIO &&
@@ -672,9 +672,39 @@ processPointer ALG_RR() {
 	return runningProcess;
 }
 
+// IO-Aware SJF 알고리즘(추가함수, 평가항목 11번)
+processPointer ALG_IASJF() {
+	// 실행 중이면 계속 실행
+	if (runningProcess != NULL && runningProcess->cpuRemainingTime > 0)
+		return runningProcess;
 
+	if (readySize == 0)
+		return NULL;
 
-// 평가(waiting time, turnaround time, response time) 평가항목 10번
+	int bestIndex = 0;
+	int bestEffective = readyQueue[0]->cpuRemainingTime +
+		(readyQueue[0]->hasRequestedIO ? 0 : readyQueue[0]->ioBurstTime);
+
+	for (int i = 1; i < readySize; i++) {
+		int effective = readyQueue[i]->cpuRemainingTime +
+			(readyQueue[i]->hasRequestedIO ? 0 : readyQueue[i]->ioBurstTime);
+
+		if (effective < bestEffective) {
+			bestEffective = effective;
+			bestIndex = i;
+		}
+		else if (effective == bestEffective) {
+			// 도착 시간이 빠른 순
+			if (readyQueue[i]->arrivalTime < readyQueue[bestIndex]->arrivalTime) {
+				bestIndex = i;
+			}
+		}
+	}
+
+	return deleteReadyQueue(bestIndex);
+}
+
+// 평가(waiting time, turnaround time) 평가항목 10번
 void evaluate() {
 	int totalWaitingTime = 0;
 	int totalTurnaroundTime = 0;
@@ -709,7 +739,7 @@ int main() {
 	}
 
 	// 모든 알고리즘 실행 및 평가
-	for (int alg = FCFS; alg <= RR; alg++) {
+	for (int alg = FCFS; alg <= IASJF; alg++) {
 		printf("\n============================================\n");
 		printf("%s\n", algorithmNames[alg]);
 
@@ -730,7 +760,6 @@ int main() {
 
 			clone->waitingTime = 0;
 			clone->turnaroundTime = 0;
-			clone->responseTime = -1;
 			clone->rrUsedTime = 0;
 
 			clone->ioRequestTime = original->ioRequestTime;
