@@ -163,7 +163,7 @@ processPointer createProcess() {
 	newProcess->turnaroundTime = 0;
 	newProcess->rrUsedTime = 0;
 
-	newProcess->ioRequestTime = rand() % (newProcess->cpuBurstTime - 1) + 1; // IO 요청 시점은 1 이상, cpuBurstTime-1 이하 (Cpu 작업 사이애 발생)
+	newProcess->ioRequestTime = rand() % (newProcess->cpuBurstTime - 1) + 1; // IO 요청 시점은 1 이상, cpuBurstTime-1 이하 (cpu 작업 사이애 발생)
 	newProcess->ioBurstTime = rand() % 5 + 2; // 범위 2~6으로 설정
 	newProcess->ioRemainingTime = 0;
 	newProcess->isInIO = FALSE;
@@ -290,7 +290,7 @@ void insertWaitingQueue(processPointer newProcess) {
 	}
 }
 
-// ready 큐에서 프로세스 빼기(to ready 큐)
+// ready 큐에서 프로세스 빼기(to runningprocess)
 processPointer deleteWaitingQueue(int index) {
 	if (index >= waitingSize) return NULL;
 
@@ -328,7 +328,7 @@ void insertTerminatedQueue(processPointer newProcess) {
 	}
 
 	if (terminatedSize < MAX_PROCESS_NUM) {
-		terminatedQueue[terminatedSize] = newProcess;
+		terminatedQueue[terminatedSize] = newProcess; 
 		terminatedSize++;
 	}
 	else {
@@ -346,10 +346,10 @@ void printTerminatedQueue() {
 	printf("\n-------------Terminated Processes-------------\n");
 	printf("PID  Arrival  Burst  Priority  Waiting  Turnaround\n");
 	for (int i = 0; i < terminatedSize; i++) {
-		processPointer p = terminatedQueue[i];
+		processPointer newProcess = terminatedQueue[i];
 		printf("%3d  %7d  %5d  %8d  %7d  %10d\n",
-			p->pid, p->arrivalTime, p->cpuBurstTime, p->priority,
-			p->waitingTime, p->turnaroundTime);
+			newProcess->pid, newProcess->arrivalTime, newProcess->cpuBurstTime, newProcess->priority,
+			newProcess->waitingTime, newProcess->turnaroundTime);
 	}
 }
 
@@ -813,7 +813,7 @@ int main() {
 			insertJobQueue(clone); // job 큐에 삽입
 		}
 
-		// job 큐 정렬(arrivaltime 기준으로)
+		// job 큐 정렬(arrival time 기준으로)
 		sortJobQueue();
 
 		// job큐 출력(디버깅용)
